@@ -16,35 +16,18 @@ jobs:
         with:
           token: ${{ secrets.DO_TOKEN }}
 
-      # --- 功能 1：查询所有服务器并发送邮件 ---
+      # --- 功能 1：查询所有服务器并发送 Telegram 消息 ---
       - name: List All Droplets IP
         if: github.event.client_payload.task == 'list'
-        id: get_list
         run: |
           echo "🔎 正在抓取账号下所有服务器信息..."
           LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
-          echo "SERVER_LIST<<EOF" >> $GITHUB_ENV
-          echo "$LIST" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
-      - name: Send IP List to Email
-        if: github.event.client_payload.task == 'list'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          username: beceleerichard@gmail.com
-          password: ${{ secrets.MAIL_APP_PASSWORD }}
-          subject: 📋 您当前的 DigitalOcean 服务器清单
-          to: beceleerichard@gmail.com
-          from: GitHub Actions
-          body: |
-            您好，以下是您账号下当前所有服务器的状态：
-            
-            ${{ env.SERVER_LIST }}
-            
-            -- 
-            此邮件由您的 GitHub 自动化脚本发出。
+          
+          # 核心修改：通过 API 发送消息到你的 Telegram
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="📋 当前 DigitalOcean 服务器清单：
+            $LIST"
 
       # --- 功能 2：销毁名为 minidrop 的服务器 ---
       - name: Destroy Droplet
@@ -53,7 +36,11 @@ jobs:
           ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
           if [ ! -z "$ID" ]; then
             doctl compute droplet delete $ID --force
-            echo "✅ 已成功销毁 minidrop"
+            
+            # 销毁成功也发个 TG 提醒
+            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+              -d chat_id=${{ secrets.TG_CHAT_ID }} \
+              -d text="✅ 已成功销毁名为 minidrop 的服务器"
           else
             echo "❓ 未发现名为 minidrop 的服务器"
           fi
@@ -73,6 +60,13 @@ jobs:
           
           IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
           echo "IP=$IP" >> $GITHUB_ENV
+          
+          # 创建成功发个 TG 提醒
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="🏗️ 服务器创建成功！
+            IP 地址：$IP
+            正在配置 s-ui，请稍候 2 分钟..."
 
       # --- 功能 4：安装 s-ui 并同步数据库 ---
       - name: Install s-ui and Sync DB
@@ -110,4 +104,4 @@ jobs:
             [ -d "/etc/s-ui/" ] && cp /root/s-ui.db /etc/s-ui/s-ui.db
             chmod 777 /usr/local/s-ui/db/s-ui.db
             systemctl restart s-ui
-            echo "🎉 自动换库完成，节点已就绪！"
+            echo "🎉 自动换库完成"
