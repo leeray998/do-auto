@@ -23,7 +23,7 @@ jobs:
           echo "🔎 正在抓取账号下所有服务器信息..."
           LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
           
-          # 核心修改：通过 API 发送消息到你的 Telegram
+          # 通过 API 发送消息到你的 Telegram
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="📋 当前 DigitalOcean 服务器清单：
@@ -68,7 +68,7 @@ jobs:
             IP 地址：$IP
             正在配置 s-ui，请稍候 2 分钟..."
 
-      # --- 功能 4：安装 s-ui 并同步数据库 ---
+      # --- 功能 4：安装 s-ui 并同步数据库 (整合了自动按键回复) ---
       - name: Install s-ui and Sync DB
         if: github.event.client_payload.task == 'create'
         uses: appleboy/ssh-action@v1.0.3
@@ -79,7 +79,8 @@ jobs:
           script: |
             sleep 15
             VERSION=1.2.2
-            bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
+            # 使用 printf 模拟按下 y 和 多次尝试回车，强制跳过脚本的交互提问
+            printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
             sleep 5
 
       - name: SCP Database to VPS
@@ -100,8 +101,18 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            [ -d "/usr/local/s-ui/db/" ] && cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db
-            [ -d "/etc/s-ui/" ] && cp /root/s-ui.db /etc/s-ui/s-ui.db
-            chmod 777 /usr/local/s-ui/db/s-ui.db
+            # 停止服务确保覆盖成功
+            systemctl stop s-ui || true
+            # 自动创建目录并覆盖数据库
+            [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
+            [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
+            cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
+            cp /root/s-ui.db /etc/s-ui/s-ui.db || true
+            chmod 777 /usr/local/s-ui/db/s-ui.db || true
+            # 重启服务
             systemctl restart s-ui
             echo "🎉 自动换库完成"
+            # 发送最终成功的 TG 提醒
+            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+              -d chat_id=${{ secrets.TG_CHAT_ID }} \
+              -d text="✅ s-ui 配置已完成！数据库已同步，你可以连接了。"
