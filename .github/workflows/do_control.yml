@@ -77,9 +77,9 @@ jobs:
             IP 地址：$IP
             正在配置 s-ui，请稍候 2 分钟..."
 
-      # --- 功能 4：[安装阶段] 针对 Create 或 Setup 运行 ---
+      # --- 功能 4：[安装阶段] 针对 GitHub 优化后的强制自动模式 ---
       - name: Install s-ui and Wait
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup')
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ env.IP }}
@@ -90,7 +90,6 @@ jobs:
           command_timeout: 20m
           script: |
             echo "📡 正在检测 SSH 连接状态..."
-            # 循环探测逻辑，保留 12 次尝试，每次 10 秒
             for i in {1..12}; do
               if systemctl is-active ssh >/dev/null 2>&1; then
                 echo "✅ SSH 服务已上线！"
@@ -100,18 +99,18 @@ jobs:
               sleep 10
             done
             
-            # 缓冲时间
             sleep 10
             
-            echo "🛠️ 开始安装 s-ui..."
+            echo "🛠️ 开始强制全自动安装 s-ui..."
+            # 使用 yes "" 模拟无限回车，DEBIAN_FRONTEND 禁用所有弹窗提问
+            export DEBIAN_FRONTEND=noninteractive
             VERSION=1.2.2
-            # 模拟按键回复 y 和多次尝试回车
-            printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
+            yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
             sleep 5
 
-      # --- 功能 5：[传输阶段] 针对 Create 或 Setup 运行 ---
+      # --- 功能 5：[传输阶段] 增加工作目录显式声明以修复 empty archive ---
       - name: SCP Database to VPS
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup')
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ env.IP }}
@@ -119,12 +118,13 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           timeout: 60s
-          source: "s-ui.db"
+          source: "./s-ui.db"
           target: "/root/"
+          strip_components: 0
 
       # --- 功能 6：[配置阶段] 针对 Create 或 Setup 运行 ---
       - name: Finalize s-ui and Sync DB
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup')
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ env.IP }}
@@ -134,10 +134,8 @@ jobs:
           timeout: 60s
           script: |
             echo "📁 正在执行数据库覆盖与配置..."
-            # 停止服务确保覆盖成功
             systemctl stop s-ui || true
             
-            # 自动创建目录并覆盖数据库
             [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
             [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
             
@@ -146,18 +144,16 @@ jobs:
             cp /root/s-ui.db /etc/s-ui/s-ui.db || true
             chmod 777 /usr/local/s-ui/db/s-ui.db || true
             
-            # 重启服务
             echo "🔄 正在重启 s-ui 服务..."
             systemctl restart s-ui
             echo "🎉 自动换库完成"
             
-            # 发送最终成功的 TG 提醒
             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
               -d chat_id=${{ secrets.TG_CHAT_ID }} \
               -d text="✅ s-ui 操作已完成！
               任务：${{ github.event.client_payload.task }}
               IP：${{ env.IP }}
-              数据库已同步，你可以连接了。"
+              数据库已同步。"
 
       # --- 错误处理：如果 IP 为空则报错 ---
       - name: Check IP Validity
