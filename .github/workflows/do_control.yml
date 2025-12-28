@@ -1,5 +1,4 @@
 name: DO_Control_Pipeline_V2
-
 on:
   repository_dispatch:
     types: [do_action]
@@ -33,7 +32,7 @@ jobs:
         run: |
           echo "🔎 正在抓取账号下所有服务器信息..."
           LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
-          
+         
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="📋 当前 DigitalOcean 服务器清单：
@@ -47,7 +46,7 @@ jobs:
           ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
           if [ ! -z "$ID" ]; then
             doctl compute droplet delete $ID --force
-            
+           
             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
               -d chat_id=${{ secrets.TG_CHAT_ID }} \
               -d text="✅ 已成功销毁名为 minidrop 的服务器"
@@ -67,15 +66,35 @@ jobs:
             --size s-1vcpu-512mb-10gb \
             --ssh-keys $SSH_ID \
             --wait
-          
+         
           IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
           echo "IP=$IP" >> $GITHUB_ENV
-          
+         
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="🏗️ 服务器创建成功！
             IP 地址：$IP
             正在配置 s-ui，请稍候 2 分钟..."
+
+      # --- 新增：调试用，查看当前工作目录文件（方便确认 s-ui.db 是否存在，上线后可删除）---
+      - name: Debug - List workspace files
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        run: |
+          echo "📂 当前工作目录文件列表："
+          ls -la
+
+      # --- 新增：检查本地是否有 s-ui.db 文件，避免 empty archive ---
+      - name: Check if s-ui.db exists
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        id: check_db
+        run: |
+          if [ -f "s-ui.db" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ 检测到 s-ui.db，准备上传"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ 未找到 s-ui.db，将跳过数据库上传（首次创建正常）"
+          fi
 
       # --- 功能 4：[安装阶段] 针对 GitHub 优化后的强制自动模式 ---
       - name: Install s-ui and Wait
@@ -98,19 +117,22 @@ jobs:
               echo "⏳ 等待 SSH 就绪 ($i/12)..."
               sleep 10
             done
-            
+           
             sleep 10
-            
+           
             echo "🛠️ 开始强制全自动安装 s-ui..."
-            # 使用 yes "" 模拟无限回车，DEBIAN_FRONTEND 禁用所有弹窗提问
             export DEBIAN_FRONTEND=noninteractive
             VERSION=1.2.2
             yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
             sleep 5
 
-      # --- 功能 5：[传输阶段] 增加工作目录显式声明以修复 empty archive ---
+      # --- 修改后的 SCP：只有在 s-ui.db 存在时才执行上传 ---
       - name: SCP Database to VPS
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        if: >
+          (github.event.client_payload.task == 'create' || 
+           github.event.client_payload.task == 'setup') && 
+          env.IP != '' && 
+          steps.check_db.outputs.exists == 'true'
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ env.IP }}
@@ -118,11 +140,25 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           timeout: 60s
-          source: "./s-ui.db"
+          source: "s-ui.db"
           target: "/root/"
           strip_components: 0
+          overwrite: true
 
-      # --- 功能 6：[配置阶段] 针对 Create 或 Setup 运行 ---
+      # --- 可选：数据库不存在时的 Telegram 提示 ---
+      - name: Notify - Skip DB Upload
+        if: >
+          (github.event.client_payload.task == 'create' || 
+           github.event.client_payload.task == 'setup') && 
+          env.IP != '' && 
+          steps.check_db.outputs.exists == 'false'
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="ℹ️ 未检测到本地 s-ui.db 文件，已跳过数据库上传。
+          如需恢复备份，请将 s-ui.db 放入仓库根目录后重新触发 setup 任务。"
+
+      # --- 功能 6：[配置阶段] 最终同步数据库并重启 ---
       - name: Finalize s-ui and Sync DB
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
@@ -135,25 +171,25 @@ jobs:
           script: |
             echo "📁 正在执行数据库覆盖与配置..."
             systemctl stop s-ui || true
-            
+           
             [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
             [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
-            
+           
             echo "📂 正在同步数据库文件..."
             cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
             cp /root/s-ui.db /etc/s-ui/s-ui.db || true
             chmod 777 /usr/local/s-ui/db/s-ui.db || true
-            
+           
             echo "🔄 正在重启 s-ui 服务..."
             systemctl restart s-ui
             echo "🎉 自动换库完成"
-            
+           
             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
               -d chat_id=${{ secrets.TG_CHAT_ID }} \
               -d text="✅ s-ui 操作已完成！
               任务：${{ github.event.client_payload.task }}
               IP：${{ env.IP }}
-              数据库已同步。"
+              数据库已同步（若上传则覆盖）。"
 
       # --- 错误处理：如果 IP 为空则报错 ---
       - name: Check IP Validity
