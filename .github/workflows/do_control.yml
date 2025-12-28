@@ -66,6 +66,7 @@ jobs:
             正在配置 s-ui，请稍候 2 分钟..."
 
      # --- 功能 4：安装 s-ui 并同步数据库 (修正了超时参数名) ---
+  # --- 功能 4：安装 s-ui (带自动重试探测逻辑) ---
       - name: Install s-ui and Sync DB
         if: github.event.client_payload.task == 'create'
         uses: appleboy/ssh-action@v1.0.3
@@ -73,16 +74,27 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # 关键修正：参数名必须是 timeout (单位是字符串，需加s)
-          timeout: 60s
+          port: 22
+          timeout: 100s        # 延长插件层面的等待时间
           command_timeout: 15m
           script: |
-            # 延长等待至 45 秒，给 Ubuntu 24.04 充足的初始化时间
-            sleep 45
-            VERSION=1.2.2
-            # 模拟按键回复 y 和回车
-            printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
+            # --- 核心改进：循环等待 SSH 就绪 ---
+            echo "正在等待远程 SSH 服务就绪..."
+            for i in {1..10}; do
+              if systemctl is-active ssh >/dev/null 2>&1; then
+                echo "SSH 服务已上线！"
+                break
+              fi
+              echo "等待中 ($i/10)..."
+              sleep 10
+            done
+
+            # 系统就绪后多给 5 秒缓冲
             sleep 5
+            
+            # 执行安装
+            VERSION=1.2.2
+            printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
 
       - name: SCP Database to VPS
         if: github.event.client_payload.task == 'create'
