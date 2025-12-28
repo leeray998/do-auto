@@ -65,8 +65,7 @@ jobs:
             IP 地址：$IP
             正在配置 s-ui，请稍候 2 分钟..."
 
-     # --- 功能 4：安装 s-ui 并同步数据库 (修正了超时参数名) ---
-  # --- 功能 4：安装 s-ui (带自动重试探测逻辑) ---
+      # --- 功能 4：安装 s-ui (增加了插件层面的自动重试功能) ---
       - name: Install s-ui and Sync DB
         if: github.event.client_payload.task == 'create'
         uses: appleboy/ssh-action@v1.0.3
@@ -75,8 +74,10 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          timeout: 100s        # 延长插件层面的等待时间
+          timeout: 30s
           command_timeout: 15m
+          # 【新增功能】如果遇到 connection refused，插件会自动重试 10 次
+          max_uses: 10
           script: |
             # --- 核心改进：循环等待 SSH 就绪 ---
             echo "正在等待远程 SSH 服务就绪..."
@@ -113,8 +114,9 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # 同样这里也加上超时保护
           timeout: 60s
+          # 【新增功能】确保最后一步也能在连接不稳定时自动重试
+          max_uses: 5
           script: |
             systemctl stop s-ui || true
             [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
