@@ -65,7 +65,7 @@ jobs:
             IP 地址：$IP
             正在配置 s-ui，请稍候 2 分钟..."
 
-      # --- 功能 4：安装 s-ui 并同步数据库 (强化了连接稳健性) ---
+     # --- 功能 4：安装 s-ui 并同步数据库 (修正了超时参数名) ---
       - name: Install s-ui and Sync DB
         if: github.event.client_payload.task == 'create'
         uses: appleboy/ssh-action@v1.0.3
@@ -73,14 +73,14 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # 增加超时宽限，解决 Connection Refused 报错
-          connect_timeout: 60s
+          # 关键修正：参数名必须是 timeout (单位是字符串，需加s)
+          timeout: 60s
           command_timeout: 15m
           script: |
-            # 延长等待至 30 秒，确保 Ubuntu 24.04 SSH 完全就绪
-            sleep 30
+            # 延长等待至 45 秒，给 Ubuntu 24.04 充足的初始化时间
+            sleep 45
             VERSION=1.2.2
-            # 自动回复 y 并连续模拟回车，跳过所有交互
+            # 模拟按键回复 y 和回车
             printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
             sleep 5
 
@@ -101,6 +101,8 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # 同样这里也加上超时保护
+          timeout: 60s
           script: |
             systemctl stop s-ui || true
             [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
