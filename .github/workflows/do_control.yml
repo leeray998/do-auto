@@ -1,4 +1,4 @@
-name: DO_Control_Pipeline_V2
+name: DO_Control_Pipeline_V3
 
 on:
   repository_dispatch:
@@ -16,152 +16,95 @@ jobs:
         with:
           token: ${{ secrets.DO_TOKEN }}
 
-      # --- [前置步骤] 只有在执行 create 或 setup 时才需要确定 IP ---
-      - name: Get Current IP for Setup
-        if: github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup'
-        run: |
-          echo "🔍 正在检索服务器 IP..."
-          EXISTING_IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          if [ ! -z "$EXISTING_IP" ]; then
-            echo "IP=$EXISTING_IP" >> $GITHUB_ENV
-            echo "📍 目标 IP 已确定: $EXISTING_IP"
-          fi
-
-      # --- 功能 1：查询所有服务器并发送 Telegram 消息 ---
-      - name: List All Droplets IP
+      # --- 功能 1：查询 (保留) ---
+      - name: List All Droplets
         if: github.event.client_payload.task == 'list'
         run: |
-          echo "🔎 正在抓取账号下所有服务器信息..."
           LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
-          
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="📋 当前 DigitalOcean 服务器清单：
-            $LIST"
+            -d text="📋 当前服务器清单：$LIST"
 
-      # --- 功能 2：销毁名为 minidrop 的服务器 ---
+      # --- 功能 2：销毁 (保留) ---
       - name: Destroy Droplet
         if: github.event.client_payload.task == 'delete'
         run: |
-          echo "🗑️ 正在尝试销毁服务器..."
           ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          if [ ! -z "$ID" ]; then
-            doctl compute droplet delete $ID --force
-            
-            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-              -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              -d text="✅ 已成功销毁名为 minidrop 的服务器"
-          else
-            echo "❓ 未发现名为 minidrop 的服务器"
-          fi
+          [ ! -z "$ID" ] && doctl compute droplet delete $ID --force
 
-      # --- 功能 3：创建最小规格服务器 (512MB) ---
-      - name: Create Droplet
+      # --- 功能 3：【全新逻辑】创建并自动安装 (Cloud-Init) ---
+      - name: Create Droplet with Cloud-Init
         if: github.event.client_payload.task == 'create'
         run: |
-          echo "🏗️ 正在创建 512MB 最小规格服务器..."
+          echo "🚀 正在使用 Cloud-Init 模式创建服务器..."
           SSH_ID=$(doctl compute ssh-key list --format ID --no-header | head -n 1)
+          
+          # 将安装脚本直接写入 User-Data
+          # 服务器开机即运行，无需 SSH 等待
           doctl compute droplet create minidrop \
             --region sfo3 \
             --image ubuntu-24-04-x64 \
             --size s-1vcpu-512mb-10gb \
             --ssh-keys $SSH_ID \
+            --user-data "#!/bin/bash
+            sleep 10
+            printf 'y\n\n\n\n' | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/1.2.2/install.sh) 1.2.2" \
             --wait
-          
+
           IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
           echo "IP=$IP" >> $GITHUB_ENV
           
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="🏗️ 服务器创建成功！
-            IP 地址：$IP
-            正在配置 s-ui，请稍候 2 分钟..."
+            -d text="🏗️ 服务器创建中！IP: $IP。系统正在后台自动安装 s-ui，请在 1 分钟后尝试连接。"
 
-      # --- 功能 4：[安装阶段] 针对 Create 或 Setup 运行 ---
-      - name: Install s-ui and Wait
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup')
+      # --- 功能 4：【独立程序】仅针对 setup 任务的 SSH 逻辑 ---
+      # 当你只想换库，不删服务器时用这个
+      - name: Get IP for Setup
+        if: github.event.client_payload.task == 'setup'
+        run: |
+          IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          echo "IP=$IP" >> $GITHUB_ENV
+
+      - name: Setup Existing VPS
+        if: github.event.client_payload.task == 'setup' && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          timeout: 120s
-          command_timeout: 20m
+          timeout: 60s
           script: |
-            echo "📡 正在检测 SSH 连接状态..."
-            # 循环探测逻辑，保留 12 次尝试，每次 10 秒
-            for i in {1..12}; do
-              if systemctl is-active ssh >/dev/null 2>&1; then
-                echo "✅ SSH 服务已上线！"
-                break
-              fi
-              echo "⏳ 等待 SSH 就绪 ($i/12)..."
-              sleep 10
-            done
-            
-            # 缓冲时间
-            sleep 10
-            
-            echo "🛠️ 开始安装 s-ui..."
-            VERSION=1.2.2
-            # 模拟按键回复 y 和多次尝试回车
-            printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
-            sleep 5
+            printf "y\n\n\n\n" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/1.2.2/install.sh) 1.2.2
 
-      # --- 功能 5：[传输阶段] 针对 Create 或 Setup 运行 ---
-      - name: SCP Database to VPS
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup')
+      # --- 功能 5：统一同步数据库 (无论是 create 还是 setup 最后都跑这个) ---
+      - name: Sync Database
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        run: |
+          echo "等待 40 秒确保 SSH 服务在安装后稳定..."
+          sleep 40
+        
+      - name: SCP DB
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          timeout: 60s
           source: "s-ui.db"
           target: "/root/"
 
-      # --- 功能 6：[配置阶段] 针对 Create 或 Setup 运行 ---
-      - name: Finalize s-ui and Sync DB
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup')
+      - name: Finalize
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          timeout: 60s
           script: |
-            echo "📁 正在执行数据库覆盖与配置..."
-            # 停止服务确保覆盖成功
             systemctl stop s-ui || true
-            
-            # 自动创建目录并覆盖数据库
-            [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
-            [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
-            
-            echo "📂 正在同步数据库文件..."
-            cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
-            cp /root/s-ui.db /etc/s-ui/s-ui.db || true
-            chmod 777 /usr/local/s-ui/db/s-ui.db || true
-            
-            # 重启服务
-            echo "🔄 正在重启 s-ui 服务..."
+            mkdir -p /usr/local/s-ui/db/ && cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db
+            mkdir -p /etc/s-ui/ && cp /root/s-ui.db /etc/s-ui/s-ui.db
+            chmod 777 /usr/local/s-ui/db/s-ui.db
             systemctl restart s-ui
-            echo "🎉 自动换库完成"
-            
-            # 发送最终成功的 TG 提醒
-            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-              -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              -d text="✅ s-ui 操作已完成！
-              任务：${{ github.event.client_payload.task }}
-              IP：${{ env.IP }}
-              数据库已同步，你可以连接了。"
-
-      # --- 错误处理：如果 IP 为空则报错 ---
-      - name: Check IP Validity
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP == ''
-        run: |
-          echo "❌ 错误：未获取到有效的 IP 地址，无法进行后续安装！"
-          exit 1
+            echo "✅ 数据库同步完成"
