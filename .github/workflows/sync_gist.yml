@@ -1,109 +1,51 @@
 name: Sync_Gist_Update
 
-
-
 on:
-
   workflow_run:
-
     workflows: ["DO_Control_Pipeline_V2"]
-
     types: [completed]
-
   workflow_dispatch:
-
     inputs:
-
       manual_ip:
-
         description: '手动输入 IP'
-
         required: false
 
-
-
 jobs:
-
   update_gist:
-
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Get New IP from DO
-
         run: |
-
           curl -sL https://github.com/digitalocean/doctl/releases/download/v1.101.0/doctl-1.101.0-linux-amd64.tar.gz | tar xz
-
           ./doctl compute droplet list --format "PublicIPv4,Name" --no-header --access-token ${{ secrets.DO_TOKEN }} | grep "minidrop" | awk '{print $1}' > ip.txt
-
           echo "NEW_IP=$(cat ip.txt)" >> $GITHUB_ENV
 
-
-
       - name: Combine and Update Gist
-
         env:
-
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-
           GIST_ID: ${{ secrets.GIST_ID }}
-
+          # 从 Secret 中读取 UUID
+          MY_UUID: ${{ secrets.MY_UUID }}
         run: |
-
           IP=${{ env.NEW_IP }}
+          # 使用单引号包裹变量，防止 Shell 解析特殊字符出错
+          # 将原本的 UUID 替换为变量 $MY_UUID
+          NEW_CONTENT="vless://${MY_UUID}@${IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=iosapps.itunes.apple.com&fp=edge&pbk=PdJjph4YO4F3zRfLdAFHgWaUnNYbSKVOKt1ifPJHI2s&type=tcp&headerType=none#DO-Reality"
 
-          echo "📍 正在为 IP $IP 重新生成订阅内容..."
-
-          
-
-          # 【组合逻辑】直接把 $IP 拼接到你的 VLESS 模板中
-
-          # 注意：这里使用了你提供的完整参数
-
-          NEW_CONTENT="vless://f3fedc45-8e6a-430b-980b-2320a652858f@$IP:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=iosapps.itunes.apple.com&fp=edge&pbk=PdJjph4YO4F3zRfLdAFHgWaUnNYbSKVOKt1ifPJHI2s&type=tcp&headerType=none#DO-Reality"
-
-
-
-
-
-          # 使用 jq 封装，确保特殊符号不会导致 JSON 错误
-
+          # 使用 jq 构造 JSON，这是最稳妥的办法
           jq -n --arg ip "$IP" --arg sub "$NEW_CONTENT" \
-
             '{files: {"ip.txt": {content: $ip}, "sub.txt": {content: $sub}}}' > payload.json
-
           
-
-          # 推送给 Gist
-
           curl -L -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
-
             -H "X-GitHub-Api-Version: 2022-11-28" \
-
             https://api.github.com/gists/$GIST_ID -d @payload.json
-
           
-
-          echo "✅ Gist 更新成功！内容已重组。"
-
-
+          echo "✅ Gist 更新成功！"
 
       - name: Notify Telegram
-
+        if: always()
         run: |
-
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-
-            -d text="🔄 Gist 同步完成！
-
-            
-
-📍 新 IP: ${{ env.NEW_IP }}
-
-🔗 订阅内容已根据模板重新生成。"
+            -d text="🔄 Gist 同步完成！%0A📍 新 IP: ${{ env.NEW_IP }}%0A🔗 订阅内容已安全生成。"
