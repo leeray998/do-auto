@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       manual_ip:
-        description: '手动输入 IP (可选)'
+        description: '手动输入 IP (手机触发通常留空)'
         required: false
 
 jobs:
@@ -15,63 +15,39 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Get Target IP
-        id: get_ip
+      - name: Get Current IP from DO
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ ! -z "${{ github.event.inputs.manual_ip }}" ]; then
-            echo "IP=${{ github.event.inputs.manual_ip }}" >> $GITHUB_ENV
-          else
-            echo "📡 正在从 DigitalOcean 获取最新 IP..."
-            curl -sL https://github.com/digitalocean/doctl/releases/download/v1.101.0/doctl-1.101.0-linux-amd64.tar.gz | tar xz
-            ./doctl compute droplet list --format "PublicIPv4,Name" --no-header --access-token ${{ secrets.DO_TOKEN }} | grep "minidrop" | awk '{print $1}' > ip_result.txt
-            IP_ADDR=$(cat ip_result.txt)
-            if [ -z "$IP_ADDR" ]; then echo "❌ 未找到名为 minidrop 的服务器"; exit 1; fi
-            echo "IP=$IP_ADDR" >> $GITHUB_ENV
-          fi
+          echo "📡 正在获取服务器最新 IP..."
+          curl -sL https://github.com/digitalocean/doctl/releases/download/v1.101.0/doctl-1.101.0-linux-amd64.tar.gz | tar xz
+          ./doctl compute droplet list --format "PublicIPv4,Name" --no-header --access-token ${{ secrets.DO_TOKEN }} | grep "minidrop" | awk '{print $1}' > ip.txt
+          echo "NEW_IP=$(cat ip.txt)" >> $GITHUB_ENV
 
-      - name: Process and Sync
+      - name: Update Gist Content
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_ID: "4e15588701f033f0"
         run: |
-          NEW_IP=${{ env.IP }}
-          echo "📍 目标 IP: $NEW_IP"
-          
-          # 1. 获取当前 Gist 数据 (使用 jq 提取，更稳)
+          # 1. 下载当前 Gist 全量数据
           GIST_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/gists/$GIST_ID")
+          
+          # 2. 提取 sub.txt (处理 Base64 或特殊字符)
           OLD_SUB=$(echo "$GIST_JSON" | jq -r '.files["sub.txt"].content')
           
-          if [ "$OLD_SUB" == "null" ]; then echo "❌ 无法获取 sub.txt 内容，请检查 GIST_ID"; exit 1; fi
-
-          # 2. 精准替换 IP：只替换 @ 符号之后、端口号 : 之前的 IP 部分，防止破坏 UUID 或端口
-          # 正则解释：查找 @ 后面跟着的 IP，并替换，保留前后的 @ 和 :
-          NEW_SUB=$(echo "$OLD_SUB" | sed -E "s/(@)([0-9]{1,3}\.){3}[0-9]{1,3}(:)/\1$NEW_IP\3/g")
+          # 3. 【核心修正】使用 Perl 正则精准替换 @ 和 : 之间的地址
+          # 这样即便你的 sub.txt 是域名、旧 IP 都能被强制换成新 IP
+          NEW_SUB=$(echo "$OLD_SUB" | perl -pe "s/(\@).*?(:)/\$1${{ env.NEW_IP }}\$2/g")
           
-          # 3. 构造上传 Payload
-          jq -n --arg ip "$NEW_IP" --arg sub "$NEW_SUB" \
+          # 4. 构造 Payload 并 PATCH
+          # 同时更新 ip.txt (纯 IP) 和 sub.txt (完整链接)
+          jq -n --arg ip "${{ env.NEW_IP }}" --arg sub "$NEW_SUB" \
             '{files: {"ip.txt": {content: $ip}, "sub.txt": {content: $sub}}}' > payload.json
           
-          # 4. 执行更新
-          RESPONSE=$(curl -L -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/gists/$GIST_ID -d @payload.json)
-            
-          if echo "$RESPONSE" | grep -q "files"; then
-            echo "✅ Gist 远程同步成功"
-          else
-            echo "❌ Gist 同步失败: $RESPONSE"
-            exit 1
-          fi
+          curl -s -X PATCH -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @payload.json "https://api.github.com/gists/$GIST_ID"
 
       - name: Notify Telegram
-        if: always()
         run: |
-          # 根据上一步结果发送不同通知
-          if [ "${{ job.status }}" == "success" ]; then
-            MSG="🔄 Gist 自动同步成功！%0A📍 当前 IP: ${{ env.IP }}%0A📜 订阅链接已指向新服务器。"
-          else
-            MSG="⚠️ Gist 同步任务失败，请检查 GitHub Actions 日志。"
-          fi
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="$MSG"
+            -d text="📱 手机端同步指令已完成！%0AGist ID: 4e155887...%0A新 IP: ${{ env.NEW_IP }}%0A请尝试刷新手机订阅。"
