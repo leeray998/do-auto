@@ -4,22 +4,27 @@
           GIST_ID: ${{ secrets.GIST_ID }}
           MY_UUID: ${{ secrets.MY_UUID }}
         run: |
-          IP=${{ env.NEW_IP }}
-          echo "📍 正在为 IP $IP 生成加密订阅内容..."
-          
-          # 1. 先生成明文内容
-          RAW_CONTENT="vless://${MY_UUID}@${IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=iosapps.itunes.apple.com&fp=edge&pbk=PdJjph4YO4F3zRfLdAFHgWaUnNYbSKVOKt1ifPJHI2s&type=tcp&headerType=none#DO-Reality"
+          # 1. 获取 IP
+          IP="${{ env.NEW_IP }}"
+          echo "📍 处理 IP: $IP"
 
-          # 2. 【核心修改】将明文内容转为 Base64 编码 (增加安全性)
-          # -w 0 确保编码后的内容是一整行，不会断行
-          B64_CONTENT=$(echo -n "$RAW_CONTENT" | base64 -w 0)
+          # 2. 将明文内容写入临时文件 (使用双引号包裹防止变量失效)
+          # 这样可以完美处理链接中的 & 和 ? 符号
+          echo -n "vless://${MY_UUID}@${IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=iosapps.itunes.apple.com&fp=edge&pbk=PdJjph4YO4F3zRfLdAFHgWaUnNYbSKVOKt1ifPJHI2s&type=tcp&headerType=none#DO-Reality" > raw_link.txt
 
-          # 3. 将加密后的内容写入 Gist
+          # 3. 进行 Base64 编码并存入变量
+          B64_CONTENT=$(base64 -w 0 < raw_link.txt)
+
+          # 4. 构造 JSON Payload
+          # 使用 jq 的 --argfile 或 --arg 传参是最安全的
           jq -n --arg ip "$IP" --arg sub "$B64_CONTENT" \
             '{files: {"ip.txt": {content: $ip}, "sub.txt": {content: $sub}}}' > payload.json
           
-          curl -L -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
+          # 5. 推送更新
+          curl -L -s -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/gists/$GIST_ID -d @payload.json
+            -H "Content-Type: application/json" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} -d @payload.json
           
-          echo "✅ Gist 更新成功！sub.txt 现在已是加密状态。"
+          echo "✅ Gist 更新成功！已转换为 Base64 编码。"
