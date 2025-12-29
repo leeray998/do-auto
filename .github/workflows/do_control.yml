@@ -1,198 +1,180 @@
 name: DO_Control_Pipeline_V2
 
 on:
-  repository_dispatch:
-    types: [do_action]
+  repository_dispatch:
+    types: [do_action]
 
 jobs:
-  manage_droplet:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+  manage_droplet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Install doctl
-        uses: digitalocean/action-doctl@v2
-        with:
-          token: ${{ secrets.DO_TOKEN }}
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_TOKEN }}
 
-      # --- [前置步骤] 只有在执行 create 或 setup 时才需要确定 IP ---
-      - name: Get Current IP for Setup
-        if: github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup'
-        run: |
-          echo "🔍 正在检索服务器 IP..."
-          EXISTING_IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          if [ ! -z "$EXISTING_IP" ]; then
-            echo "IP=$EXISTING_IP" >> $GITHUB_ENV
-            echo "📍 目标 IP 已确定: $EXISTING_IP"
-          fi
+      # --- [前置步骤] 只有在执行 create 或 setup 时才需要确定 IP ---
+      - name: Get Current IP for Setup
+        if: github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup'
+        run: |
+          echo "🔍 正在检索服务器 IP..."
+          EXISTING_IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          if [ ! -z "$EXISTING_IP" ]; then
+            echo "IP=$EXISTING_IP" >> $GITHUB_ENV
+            echo "📍 目标 IP 已确定: $EXISTING_IP"
+          fi
 
-      # --- 功能 1：查询所有服务器并发送 Telegram 消息 ---
-      - name: List All Droplets IP
-        if: github.event.client_payload.task == 'list'
-        run: |
-          echo "🔎 正在抓取账号下所有服务器信息..."
-          LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
-          
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="📋 当前 DigitalOcean 服务器清单：
-            $LIST"
+      # --- 功能 1：查询所有服务器并发送 Telegram 消息 ---
+      - name: List All Droplets IP
+        if: github.event.client_payload.task == 'list'
+        run: |
+          echo "🔎 正在抓取账号下所有服务器信息..."
+          LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="📋 当前 DigitalOcean 服务器清单：
+            $LIST"
 
-      # --- 功能 2：销毁名为 minidrop 的服务器 ---
-      - name: Destroy Droplet
-        if: github.event.client_payload.task == 'delete'
-        run: |
-          echo "🗑️ 正在尝试销毁服务器..."
-          ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          if [ ! -z "$ID" ]; then
-            doctl compute droplet delete $ID --force
-            
-            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-              -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              -d text="✅ 已成功销毁名为 minidrop 的服务器"
-          else
-            echo "❓ 未发现名为 minidrop 的服务器"
-          fi
+      # --- 功能 2：销毁名为 minidrop 的服务器 ---
+      - name: Destroy Droplet
+        if: github.event.client_payload.task == 'delete'
+        run: |
+          echo "🗑️ 正在尝试销毁服务器..."
+          ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          if [ ! -z "$ID" ]; then
+            doctl compute droplet delete $ID --force
+            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+              -d chat_id=${{ secrets.TG_CHAT_ID }} \
+              -d text="✅ 已成功销毁名为 minidrop 的服务器"
+          else
+            echo "❓ 未发现名为 minidrop 的服务器"
+          fi
 
-      # --- 功能 3：创建最小规格服务器 (512MB) ---
-      - name: Create Droplet
-        if: github.event.client_payload.task == 'create'
-        run: |
-          echo "🏗️ 正在创建 512MB 最小规格服务器..."
-          SSH_ID=$(doctl compute ssh-key list --format ID --no-header | head -n 1)
-          doctl compute droplet create minidrop \
-            --region sfo3 \
-            --image ubuntu-24-04-x64 \
-            --size s-1vcpu-512mb-10gb \
-            --ssh-keys $SSH_ID \
-            --wait
-          
-          IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          echo "IP=$IP" >> $GITHUB_ENV
-          
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="🏗️ 服务器创建成功！ IP 地址：$IP"
-          
-          echo "⏳ 强制等待 30 秒确保 SSH 服务完全就绪..."
-          sleep 30
+      # --- 功能 3：创建最小规格服务器 (512MB) ---
+      - name: Create Droplet
+        if: github.event.client_payload.task == 'create'
+        run: |
+          echo "🏗️ 正在创建 512MB 最小规格服务器..."
+          SSH_ID=$(doctl compute ssh-key list --format ID --no-header | head -n 1)
+          doctl compute droplet create minidrop \
+            --region sfo3 \
+            --image ubuntu-24-04-x64 \
+            --size s-1vcpu-512mb-10gb \
+            --ssh-keys $SSH_ID \
+            --wait
+          IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          echo "IP=$IP" >> $GITHUB_ENV
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="🏗️ 服务器创建成功！ IP 地址：$IP"
+          echo "⏳ 强制等待 30 秒确保 SSH 服务完全就绪..."
+          sleep 30
 
-      # --- 新增：调试用，查看当前工作目录文件 ---
-      - name: Debug - List workspace files
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
-        run: |
-          echo "📂 当前工作目录文件列表："
-          ls -la
+      # --- 新增：调试用，查看当前工作目录文件 ---
+      - name: Debug - List workspace files
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        run: |
+          echo "📂 当前工作目录文件列表："
+          ls -la
 
-      # --- 新增：检查本地是否有 s-ui.db 文件 ---
-      - name: Check if s-ui.db exists
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
-        id: check_db
-        run: |
-          if [ -f "s-ui.db" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✅ 检测到 s-ui.db，准备上传"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ 未找到 s-ui.db，将跳过数据库上传"
-          fi
+      # --- 新增：检查本地是否有 s-ui.db 文件 ---
+      - name: Check if s-ui.db exists
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        id: check_db
+        run: |
+          if [ -f "s-ui.db" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ 检测到 s-ui.db，准备上传"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ 未找到 s-ui.db，将跳过数据库上传"
+          fi
 
-      # --- 功能 4：[安装阶段] 针对 GitHub 优化后的全自动模式 ---
-      - name: Install s-ui and Wait
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          use_insecure_cipher: true # 忽略指纹变更，实现真正全自动
-          port: 22
-          timeout: 120s
-          command_timeout: 20m
-          script: |
-            echo "📡 正在检测 SSH 连接状态..."
-            for i in {1..12}; do
-              if systemctl is-active ssh >/dev/null 2>&1; then
-                echo "✅ SSH 服务已上线！"
-                break
-              fi
-              echo "⏳ 等待 SSH 就绪 ($i/12)..."
-              sleep 10
-            done
-            
-            echo "🛠️ 开始强制全自动安装 s-ui..."
-            export DEBIAN_FRONTEND=noninteractive
-            VERSION=1.2.2
-            yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
-            sleep 5
+      # --- 功能 4：[安装阶段] 针对 GitHub 优化后的全自动模式 ---
+      - name: Install s-ui and Wait
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          use_insecure_cipher: true
+          port: 22
+          timeout: 120s
+          command_timeout: 20m
+          script: |
+            echo "📡 正在检测 SSH 连接状态..."
+            for i in {1..12}; do
+              if systemctl is-active ssh >/dev/null 2>&1; then
+                echo "✅ SSH 服务已上线！"
+                break
+              fi
+              echo "⏳ 等待 SSH 就绪 ($i/12)..."
+              sleep 10
+            done
+            echo "🛠️ 开始强制全自动安装 s-ui..."
+            export DEBIAN_FRONTEND=noninteractive
+            VERSION=1.2.2
+            yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
+            sleep 5
 
-      # --- 修改后的 SCP：增加了自动信任指纹 ---
-      - name: SCP Database to VPS
-        if: >
-          (github.event.client_payload.task == 'create' || 
-           github.event.client_payload.task == 'setup') && 
-          env.IP != '' && 
-          steps.check_db.outputs.exists == 'true'
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ env.IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          use_insecure_cipher: true # 自动信任新服务器
-          port: 22
-          timeout: 60s
-          source: "s-ui.db"
-          target: "/root/"
-          strip_components: 0
-          overwrite: true
+      # --- 修改后的 SCP：增加了自动信任指纹 ---
+      - name: SCP Database to VPS
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != '' && steps.check_db.outputs.exists == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          use_insecure_cipher: true
+          port: 22
+          timeout: 60s
+          source: "s-ui.db"
+          target: "/root/"
+          strip_components: 0
+          overwrite: true
 
-      # --- 可选：数据库不存在时的 Telegram 提示 ---
-      - name: Notify - Skip DB Upload
-        if: >
-          (github.event.client_payload.task == 'create' || 
-           github.event.client_payload.task == 'setup') && 
-          env.IP != '' && 
-          steps.check_db.outputs.exists == 'false'
-        run: |
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="ℹ️ 未检测到本地 s-ui.db 文件，已跳过数据库上传。"
+      # --- 可选：数据库不存在时的 Telegram 提示 ---
+      - name: Notify - Skip DB Upload
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != '' && steps.check_db.outputs.exists == 'false'
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="ℹ️ 未检测到本地 s-ui.db 文件，已跳过数据库上传。"
 
-      # --- 功能 6：[配置阶段] 最终同步数据库并重启 ---
-      - name: Finalize s-ui and Sync DB
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          use_insecure_cipher: true # 自动信任新服务器
-          port: 22
-          timeout: 60s
-          script: |
-            echo "📁 正在执行数据库覆盖与配置..."
-            systemctl stop s-ui || true
-            
-            [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
-            [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
-            
-            echo "📂 正在同步数据库文件..."
-            cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
-            cp /root/s-ui.db /etc/s-ui/s-ui.db || true
-            chmod 777 /usr/local/s-ui/db/s-ui.db || true
-            
-            echo "🔄 正在重启 s-ui 服务..."
-            systemctl restart s-ui
-            echo "🎉 自动换库完成"
-            
-            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-              -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              -d text="✅ s-ui 配置完成！ IP：${{ env.IP }} 数据库已同步。"
+      # --- 功能 6：[配置阶段] 最终同步数据库并重启 ---
+      - name: Finalize s-ui and Sync DB
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          use_insecure_cipher: true
+          port: 22
+          timeout: 60s
+          script: |
+            echo "📁 正在执行数据库覆盖与配置..."
+            systemctl stop s-ui || true
+            [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
+            [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
+            echo "📂 正在同步数据库文件..."
+            cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
+            cp /root/s-ui.db /etc/s-ui/s-ui.db || true
+            chmod 777 /usr/local/s-ui/db/s-ui.db || true
+            echo "🔄 正在重启 s-ui 服务..."
+            systemctl restart s-ui
+            echo "🎉 自动换库完成"
+            curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+              -d chat_id=${{ secrets.TG_CHAT_ID }} \
+              -d text="✅ s-ui 配置完成！ IP：${{ env.IP }} 数据库已同步。"
 
-      # --- 错误处理 ---
-      - name: Check IP Validity
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP == ''
-        run: |
-          echo "❌ 错误：未获取到有效的 IP 地址！"
-          exit 1
+      # --- 错误处理 ---
+      - name: Check IP Validity
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP == ''
+        run: |
+          echo "❌ 错误：未获取到有效的 IP 地址！"
+          exit 1
