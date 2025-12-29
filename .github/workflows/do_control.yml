@@ -196,3 +196,54 @@ jobs:
         run: |
           echo "❌ 错误：未获取到有效的 IP 地址！"
           exit 1
+
+
+          # --- 功能 7：智能同步 Gist (ip.txt + sub.txt) ---
+      - name: Smart Sync Gist Content
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        run: |
+          echo "☁️ 正在智能同步 GitHub Gist..."
+          
+          # 1. 获取当前 Gist 的完整 JSON 信息
+          GIST_JSON=$(curl -s -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            "https://api.github.com/gists/${{ secrets.GIST_ID }}")
+          
+          # 2. 从 JSON 中提取 sub.txt 的旧内容 (这里使用 python3 快速提取，Ubuntu 自带)
+          OLD_SUB_CONTENT=$(echo "$GIST_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['files']['sub.txt']['content'])")
+          
+          # 3. 提取旧 IP (假设旧内容里包含 IP 地址格式)
+          # 我们利用正则表达式把 sub.txt 里的旧 IP 批量替换为当前 ${{ env.IP }}
+          # 假设你的链接格式是 ...@1.2.3.4:端口...
+          NEW_SUB_CONTENT=$(echo "$OLD_SUB_CONTENT" | sed -E "s/([0-9]{1,3}\.){3}[0-9]{1,3}/${{ env.IP }}/g")
+          
+          echo "📍 新 IP 已注入订阅内容"
+
+          # 4. 构造 PATCH 请求，同时更新 ip.txt 和 sub.txt
+          # 注意：JSON 中的换行符需要特殊处理，这里使用 python 构造安全的 JSON 体
+          PAYLOAD=$(python3 -c "
+import json, os
+ip = os.getenv('IP')
+sub = os.getenv('SUB')
+data = {
+    'files': {
+        'ip.txt': {'content': ip},
+        'sub.txt': {'content': sub}
+    }
+}
+print(json.dumps(data))
+" <<EOF
+${{ env.IP }}
+$NEW_SUB_CONTENT
+EOF
+)
+
+          # 5. 推送到 GitHub Gist
+          curl -L -s \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} \
+            -d "$PAYLOAD"
+            
+          echo "✅ Gist 同步完成！ip.txt 和 sub.txt 已指向 ${{ env.IP }}"
