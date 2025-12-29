@@ -27,11 +27,10 @@ jobs:
             echo "📍 目标 IP 已确定: $EXISTING_IP"
           fi
 
-      # --- 功能 1：查询服务器清单 ---
+      # --- 功能 1：查询清单 ---
       - name: List All Droplets IP
         if: github.event.client_payload.task == 'list'
         run: |
-          echo "🔎 正在抓取账号下所有服务器信息..."
           LIST=$(doctl compute droplet list --format "Name,PublicIPv4,Status" --no-header)
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
@@ -42,56 +41,41 @@ jobs:
       - name: Destroy Droplet
         if: github.event.client_payload.task == 'delete'
         run: |
-          echo "🗑️ 正在尝试销毁服务器..."
           ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
           if [ ! -z "$ID" ]; then
             doctl compute droplet delete $ID --force
             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
               -d chat_id=${{ secrets.TG_CHAT_ID }} \
               -d text="✅ 已成功销毁名为 minidrop 的服务器"
-          else
-            echo "❓ 未发现名为 minidrop 的服务器"
           fi
 
       # --- 功能 3：创建服务器 ---
       - name: Create Droplet
         if: github.event.client_payload.task == 'create'
         run: |
-          echo "🏗️ 正在创建 512MB 最小规格服务器..."
           SSH_ID=$(doctl compute ssh-key list --format ID --no-header | head -n 1)
           doctl compute droplet create minidrop \
-            --region sfo3 \
-            --image ubuntu-24-04-x64 \
-            --size s-1vcpu-512mb-10gb \
-            --ssh-keys $SSH_ID \
-            --wait
-          
+            --region sfo3 --image ubuntu-24-04-x64 --size s-1vcpu-512mb-10gb \
+            --ssh-keys $SSH_ID --wait
           IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
           echo "IP=$IP" >> $GITHUB_ENV
-          
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="🏗️ 服务器创建成功！
-            IP 地址：$IP
-            正在配置 s-ui，请稍候 2 分钟..."
-          
-          echo "⏳ 强制等待 30 秒确保 SSH 服务完全就绪..."
+            -d text="🏗️ 服务器创建成功！IP: $IP"
           sleep 30
 
-      # --- 功能 4：检测数据库是否存在 ---
+      # --- 功能 4：检测数据库 ---
       - name: Check if s-ui.db exists
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         id: check_db
         run: |
           if [ -f "s-ui.db" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✅ 检测到 s-ui.db，准备上传"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ 未找到 s-ui.db，将跳过数据库上传"
           fi
 
-      # --- 功能 5：安装 s-ui (带 SSH 检测循环) ---
+      # --- 功能 5：安装 s-ui (带检测循环) ---
       - name: Install s-ui and Wait
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
@@ -102,43 +86,17 @@ jobs:
           use_insecure_cipher: true
           port: 22
           timeout: 120s
-          command_timeout: 20m
           script: |
-            echo "📡 正在检测 SSH 连接状态..."
             for i in {1..12}; do
-              if systemctl is-active ssh >/dev/null 2>&1; then
-                echo "✅ SSH 服务已上线！"
-                break
-              fi
-              echo "⏳ 等待 SSH 就绪 ($i/12)..."
+              if systemctl is-active ssh >/dev/null 2>&1; then break; fi
               sleep 10
             done
-            
-            sleep 10
-            echo "🛠️ 开始强制全自动安装 s-ui..."
             export DEBIAN_FRONTEND=noninteractive
             VERSION=1.2.2
             yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
-            sleep 5
 
-      # --- 功能 6：SCP 上传数据库 ---
-      - name: SCP Database to VPS
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != '' && steps.check_db.outputs.exists == 'true'
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ env.IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          use_insecure_cipher: true
-          port: 22
-          timeout: 60s
-          source: "s-ui.db"
-          target: "/root/"
-          strip_components: 0
-          overwrite: true
-
-      # --- 功能 7：Finalize 同步配置与重启 ---
-      - name: Finalize s-ui and Sync DB
+      # --- 功能 6：上传与配置数据库 ---
+      - name: Sync Database
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -146,61 +104,58 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           use_insecure_cipher: true
-          port: 22
-          timeout: 60s
           script: |
-            echo "📁 正在执行数据库覆盖与配置..."
             systemctl stop s-ui || true
-            [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
-            [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
-            
-            echo "📂 正在同步数据库文件..."
+            mkdir -p /usr/local/s-ui/db/ /etc/s-ui/
+
+      - name: SCP Database
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != '' && steps.check_db.outputs.exists == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          use_insecure_cipher: true
+          source: "s-ui.db"
+          target: "/root/"
+
+      - name: Finalize Config
+        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          use_insecure_cipher: true
+          script: |
             cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
             cp /root/s-ui.db /etc/s-ui/s-ui.db || true
             chmod 777 /usr/local/s-ui/db/s-ui.db || true
-            
-            echo "🔄 正在重启 s-ui 服务..."
             systemctl restart s-ui
-            echo "🎉 自动换库完成"
 
-      # --- 功能 8：Gist 智能同步 (核心逻辑) ---
+      # --- 功能 7：智能同步 Gist ---
       - name: Smart Sync Gist Content
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
+        env:
+          NEW_IP: ${{ env.IP }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          echo "☁️ 正在智能同步 GitHub Gist (ip.txt + sub.txt)..."
-          GIST_JSON=$(curl -s -H "Authorization: token ${{ secrets.GH_TOKEN }}" "https://api.github.com/gists/${{ secrets.GIST_ID }}")
-          OLD_SUB_CONTENT=$(echo "$GIST_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['files']['sub.txt']['content'])")
-          NEW_SUB_CONTENT=$(echo "$OLD_SUB_CONTENT" | sed -E "s/([0-9]{1,3}\.){3}[0-9]{1,3}/${{ env.IP }}/g")
+          GIST_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/gists/$GIST_ID")
+          OLD_SUB=$(echo "$GIST_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['files']['sub.txt']['content'])")
+          NEW_SUB=$(echo "$OLD_SUB" | sed -E "s/([0-9]{1,3}\.){3}[0-9]{1,3}/$NEW_IP/g")
           
-          # 用 Python 构建 JSON 负载以处理换行符和特殊字符
+          # 使用环境变量传递数据给 Python，彻底避免引号冲突
+          export FINAL_SUB="$NEW_SUB"
           PAYLOAD=$(python3 -c "
 import json, os
-data = {
-    'files': {
-        'ip.txt': {'content': os.getenv('IP')},
-        'sub.txt': {'content': os.getenv('SUB_CONTENT')}
-    }
-}
-print(json.dumps(data))
-" <<EOF
-${{ env.IP }}
-$NEW_SUB_CONTENT
-EOF
-)
-          curl -L -s -X PATCH -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+d = {'files': {'ip.txt': {'content': os.getenv('NEW_IP')}, 'sub.txt': {'content': os.getenv('FINAL_SUB')}}}
+print(json.dumps(d))")
+          
+          curl -L -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/gists/${{ secrets.GIST_ID }} -d "$PAYLOAD"
+            https://api.github.com/gists/$GIST_ID -d "$PAYLOAD"
           
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="✅ s-ui 操作已完成！
-            任务：${{ github.event.client_payload.task }}
-            IP：${{ env.IP }}
-            Gist 订阅已自动更新为新 IP。"
-
-      # --- 功能 9：兜底检查 ---
-      - name: Check IP Validity
-        if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP == ''
-        run: |
-          echo "❌ 错误：未获取到有效的 IP 地址！"
-          exit 1
+            -d text="✅ s-ui 配置与 Gist 同步完成！IP: $NEW_IP"
