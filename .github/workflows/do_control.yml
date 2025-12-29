@@ -73,9 +73,10 @@ jobs:
           
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="🏗️ 服务器创建成功！
-            IP 地址：$IP
-            正在配置 s-ui，请稍候 2 分钟..."
+            -d text="🏗️ 服务器创建成功！ IP 地址：$IP"
+          
+          echo "⏳ 强制等待 30 秒确保 SSH 服务完全就绪..."
+          sleep 30
 
       # --- 新增：调试用，查看当前工作目录文件 ---
       - name: Debug - List workspace files
@@ -97,7 +98,7 @@ jobs:
             echo "⚠️ 未找到 s-ui.db，将跳过数据库上传"
           fi
 
-      # --- 功能 4：[安装阶段] 针对 GitHub 优化后的强制自动模式 ---
+      # --- 功能 4：[安装阶段] 针对 GitHub 优化后的全自动模式 ---
       - name: Install s-ui and Wait
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
@@ -105,7 +106,7 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          use_insecure_cipher: true # 忽略指纹变更，实现真正全自动
           port: 22
           timeout: 120s
           command_timeout: 20m
@@ -120,15 +121,13 @@ jobs:
               sleep 10
             done
             
-            sleep 10
-            
             echo "🛠️ 开始强制全自动安装 s-ui..."
             export DEBIAN_FRONTEND=noninteractive
             VERSION=1.2.2
             yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
             sleep 5
 
-      # --- 修改后的 SCP：增加了指纹校验 ---
+      # --- 修改后的 SCP：增加了自动信任指纹 ---
       - name: SCP Database to VPS
         if: >
           (github.event.client_payload.task == 'create' || 
@@ -140,7 +139,7 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          use_insecure_cipher: true # 自动信任新服务器
           port: 22
           timeout: 60s
           source: "s-ui.db"
@@ -160,7 +159,7 @@ jobs:
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="ℹ️ 未检测到本地 s-ui.db 文件，已跳过数据库上传。"
 
-      # --- 功能 6：[配置阶段] 增加了指纹校验 ---
+      # --- 功能 6：[配置阶段] 最终同步数据库并重启 ---
       - name: Finalize s-ui and Sync DB
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
@@ -168,7 +167,7 @@ jobs:
           host: ${{ env.IP }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          use_insecure_cipher: true # 自动信任新服务器
           port: 22
           timeout: 60s
           script: |
@@ -189,10 +188,7 @@ jobs:
             
             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
               -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              -d text="✅ s-ui 操作已完成！
-              任务：${{ github.event.client_payload.task }}
-              IP：${{ env.IP }}
-              数据库同步状态：已完成。"
+              -d text="✅ s-ui 配置完成！ IP：${{ env.IP }} 数据库已同步。"
 
       # --- 错误处理 ---
       - name: Check IP Validity
