@@ -1,30 +1,69 @@
-- name: Combine and Update Gist
+name: Sync_Gist_Update
+
+on:
+  workflow_run:
+    workflows: ["DO_Control_Pipeline_V2"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      manual_ip:
+        description: '手动输入 IP'
+        required: false
+
+jobs:
+  update_gist:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get New IP from DO
+        run: |
+          curl -sL https://github.com/digitalocean/doctl/releases/download/v1.101.0/doctl-1.101.0-linux-amd64.tar.gz | tar xz
+          ./doctl compute droplet list --format "PublicIPv4,Name" --no-header --access-token ${{ secrets.DO_TOKEN }} | grep "minidrop" | awk '{print $1}' > ip_result.txt
+          echo "NEW_IP=$(cat ip_result.txt)" >> $GITHUB_ENV
+
+      - name: Build and Sync
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
           MY_UUID: ${{ secrets.MY_UUID }}
         run: |
-          # 1. 获取 IP
+          # 1. 确保 IP 存在
           IP="${{ env.NEW_IP }}"
-          echo "📍 处理 IP: $IP"
+          if [ -z "$IP" ]; then echo "❌ 未获取到 IP"; exit 1; fi
 
-          # 2. 将明文内容写入临时文件 (使用双引号包裹防止变量失效)
-          # 这样可以完美处理链接中的 & 和 ? 符号
-          echo -n "vless://${MY_UUID}@${IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=iosapps.itunes.apple.com&fp=edge&pbk=PdJjph4YO4F3zRfLdAFHgWaUnNYbSKVOKt1ifPJHI2s&type=tcp&headerType=none#DO-Reality" > raw_link.txt
+          # 2. 生成明文并保存到临时文件 (完美处理特殊字符)
+          # 注意：这里我们使用 printf 确保没有多余的换行符
+          printf "vless://${MY_UUID}@${IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=iosapps.itunes.apple.com&fp=edge&pbk=PdJjph4YO4F3zRfLdAFHgWaUnNYbSKVOKt1ifPJHI2s&type=tcp&headerType=none#DO-Reality" > raw_link.txt
 
-          # 3. 进行 Base64 编码并存入变量
+          # 3. 转换为 Base64
           B64_CONTENT=$(base64 -w 0 < raw_link.txt)
 
-          # 4. 构造 JSON Payload
-          # 使用 jq 的 --argfile 或 --arg 传参是最安全的
+          # 4. 构造 JSON 并保存为文件 (防止 curl 命令参数过长报错)
+          # 注意这里的文件名 sub.txt 必须和 Gist 里的完全一致
           jq -n --arg ip "$IP" --arg sub "$B64_CONTENT" \
             '{files: {"ip.txt": {content: $ip}, "sub.txt": {content: $sub}}}' > payload.json
-          
-          # 5. 推送更新
-          curl -L -s -X PATCH \
+
+          # 5. 执行更新并打印服务器返回的错误信息
+          RESPONSE=$(curl -L -s -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "Content-Type: application/json" \
-            https://api.github.com/gists/${{ secrets.GIST_ID }} -d @payload.json
-          
-          echo "✅ Gist 更新成功！已转换为 Base64 编码。"
+            -d @payload.json \
+            "https://api.github.com/gists/$GIST_ID")
+
+          # 6. 简单的结果检查
+          if echo "$RESPONSE" | grep -q "files"; then
+            echo "✅ Gist 同步成功！"
+          else
+            echo "❌ Gist 同bs失败，服务器返回信息："
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+      - name: Notify Telegram
+        if: always()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="🔄 Gist 同步报告：
+            状态: ${{ job.status }}
+            IP: ${{ env.NEW_IP }}"
