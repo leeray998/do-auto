@@ -9,64 +9,55 @@ jobs:
   cleanup_droplet:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
       - name: Install doctl
         uses: digitalocean/action-doctl@v2
         with:
           token: ${{ secrets.DO_TOKEN }}
 
-      - name: Check and Destroy
+      - name: Dynamic Check and Destroy
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          # 1. 獲取 Droplet ID 和 IP
-          ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          # 1. 动态获取当前正在运行的 minidrop 的 IP 和 ID
+          # 这样就不需要写死 IP 了
+          DROPLET_INFO=$(doctl compute droplet list --format "ID,PublicIPv4,Name" --no-header | grep "minidrop")
+          ID=$(echo $DROPLET_INFO | awk '{print $1}')
+          IP=$(echo $DROPLET_INFO | awk '{print $2}')
           
           if [ -z "$ID" ]; then 
-            echo "無服務器，結束。"
+            echo "无服务器运行，结束。"
             exit 0
           fi
 
-          # 2. 設置 SSH 環境
+          # 2. 准备 SSH 密钥
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # 3. 檢查鎖定檔
-          IS_BUSY=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa root@$IP "[ -f /root/in_use.lock ] && echo 'YES' || echo 'NO'")
-
-          # 4. 處理計數器檔案
-          [ ! -f delay_count.txt ] && echo "0" > delay_count.txt
-          COUNT=$(cat delay_count.txt)
-
-          # 5. 邏輯判斷與通知
-          if [ "$IS_BUSY" == "YES" ]; then
-            if [ "$COUNT" -lt 1 ]; then
-              echo 1 > delay_count.txt
-              curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
-                -d chat_id=$TG_CHAT_ID -d text="⏳ 檢測到服務器正在活動中，已延後一小時進行刪除。"
-              exit 0
+          # 3. 智能检测逻辑 (SSH 连进去检查进程和流量)
+          # 注意：这里增加了一个超时限制，防止机器卡死导致 GitHub Action 挂起
+          IS_BUSY=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa root@$IP "
+            SUI_RUNNING=\$(systemctl is-active s-ui)
+            # 检查是否有除 SSH 以外的活动连接 (过滤掉 22 端口)
+            CONNECTIONS=\$(ss -ntu | grep -v '22' | grep 'ESTAB' | wc -l)
+            if [ \"\$SUI_RUNNING\" == \"active\" ] || [ \"\$CONNECTIONS\" -gt 0 ]; then
+              echo 'YES'
             else
-              curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
-                -d chat_id=$TG_CHAT_ID -d text="🚨 延後時間已到，正在強制刪除服務器..."
-              doctl compute droplet delete $ID --force
-              echo "0" > delay_count.txt
+              echo 'NO'
             fi
+          " 2>/dev/null || echo "YES") # 如果 SSH 连不上，默认认为忙碌/锁定，防止误删
+
+          # 4. 逻辑判断与 Telegram 通知
+          if [ "$IS_BUSY" == "YES" ]; then
+            curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+              -d chat_id=$TG_CHAT_ID -d text="⏳ 检测到 IP $IP 正在活动 (s-ui 或有流量)，已延后一小时。"
+            exit 0
           else
             curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
-              -d chat_id=$TG_CHAT_ID -d text="✅ 服務器閒置，刪除成功。"
+              -d chat_id=$TG_CHAT_ID -d text="✅ IP $IP 空闲，正在执行删除..."
             doctl compute droplet delete $ID --force
-            echo "0" > delay_count.txt
+            curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+              -d chat_id=$TG_CHAT_ID -d text="🗑️ 服务器 $IP 删除成功。"
           fi
-
-          # 6. 同步計數器
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add delay_count.txt
-          git commit -m "Update delay count" || echo "No changes to commit"
-          git push
