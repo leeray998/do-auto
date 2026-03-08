@@ -51,10 +51,11 @@ jobs:
 
           # 4. 逻辑判断与 Telegram 通知
           if [ "$IS_BUSY" == "YES" ]; then
-            curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
-              -d chat_id=$TG_CHAT_ID -d text="⏳ 检测到 IP $IP 正在活动 (s-ui 或有流量)，已延后一小时。"
+            # 机器在忙碌中，静默退出，不发任何 Telegram 消息
+            echo "⏳ 检测到 IP $IP 正在活动，跳过删除。"
             exit 0
           else
+            # 只有在确定要删除时，才发送通知
             curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
               -d chat_id=$TG_CHAT_ID -d text="✅ IP $IP 空闲，正在执行删除..."
             doctl compute droplet delete $ID --force
