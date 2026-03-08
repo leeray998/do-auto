@@ -1,45 +1,50 @@
 name: DO_Cleanup_Task
-
 on:
-  workflow_dispatch: # 允许你随时从 GitHub 页面手动点击运行
+  workflow_dispatch:
   schedule:
-    - cron: '57 * * * *' # 每小时的 57 分自动运行检查
+    - cron: '57 * * * *' # 每小時執行一次
 
 jobs:
   cleanup_droplet:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: digitalocean/action-doctl@v2
+        with: { token: ${{ secrets.DO_TOKEN }} }
 
-      - name: Install doctl
-        uses: digitalocean/action-doctl@v2
-        with:
-          token: ${{ secrets.DO_TOKEN }}
-
-      - name: Check Usage and Destroy
+      - name: Check Usage and Manage
         run: |
-          # 1. 获取 Droplet IP (假设你的Droplet名字是 minidrop)
-          IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          # 1. 初始化計數器檔案 (如果沒有的話)
+          [ ! -f delay_count.txt ] && echo "0" > delay_count.txt
+          COUNT=$(cat delay_count.txt)
           
-          if [ -z "$IP" ]; then
-            echo "✅ 无 minidrop 存在，无需清理。"
-            exit 0
-          fi
+          # 2. 檢查 VPS 是否使用中
+          # 使用 SSH 檢查鎖定檔 (你之前的邏輯)
+          IS_BUSY=$(ssh -o StrictHostKeyChecking=no -i id_rsa root@$(...) "[ -f /root/in_use.lock ] && echo 'YES' || echo 'NO'")
 
-          # 2. 通过 SSH 检查是否有 in_use.lock 文件 (这是最稳妥的防删逻辑)
-          # 注意：你需要确保你的 VPS 上有这个文件，或者改用 SSH 执行 netstat/ss 命令查看流量
-          SSH_CHECK=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa root@$IP "[ -f /root/in_use.lock ] && echo 'BUSY' || echo 'FREE'")
+          # 3. 核心邏輯：判斷延遲還是強制刪除
+          if [ "$IS_BUSY" == "YES" ]; then
+             if [ "$COUNT" -lt 1 ]; then
+               # 第一次檢測到使用，延後 1 小時
+               NEW_COUNT=$((COUNT + 1))
+               echo $NEW_COUNT > delay_count.txt
+               echo "⚠️ 檢測到使用，延後第 $NEW_COUNT 次 (共允許延後 1 次)。"
+               exit 0 
+             else
+               # 已經延後過，強制刪除
+               echo "🚨 延後時間已到，強制刪除！"
+               doctl compute droplet delete $(...) --force
+               echo "0" > delay_count.txt
+             fi
+          else
+             # 沒有在使用，正常刪除並重置計數
+             doctl compute droplet delete $(...) --force
+             echo "0" > delay_count.txt
+          fi
           
-          if [ "$SSH_CHECK" == "BUSY" ]; then
-             echo "⚠️ 监测到使用中 (in_use.lock)，跳过删除。"
-             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-               -d chat_id=${{ secrets.TG_CHAT_ID }} \
-               -d text="⏳ 正在使用中，自动跳过删除任务。"
-             exit 0
-          fi
-
-          # 3. 如果没在使用，执行销毁
-          ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
-          doctl compute droplet delete $ID --force
-          echo "✅ 成功销毁服务器。"
+          # 注意：你需要將 delay_count.txt 提交回倉庫才能記錄狀態
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add delay_count.txt
+          git commit -m "Update delay count"
+          git push
