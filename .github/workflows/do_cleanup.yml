@@ -20,6 +20,8 @@ jobs:
       - name: Check and Destroy
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           # 1. 獲取 Droplet ID 和 IP
           ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
@@ -42,24 +44,27 @@ jobs:
           [ ! -f delay_count.txt ] && echo "0" > delay_count.txt
           COUNT=$(cat delay_count.txt)
 
-          # 5. 邏輯判斷
+          # 5. 邏輯判斷與通知
           if [ "$IS_BUSY" == "YES" ]; then
             if [ "$COUNT" -lt 1 ]; then
-              echo $((COUNT + 1)) > delay_count.txt
-              echo "⚠️ 檢測到使用，這是第 $((COUNT + 1)) 次延後。"
+              echo 1 > delay_count.txt
+              curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+                -d chat_id=$TG_CHAT_ID -d text="⏳ 檢測到服務器正在活動中，已延後一小時進行刪除。"
               exit 0
             else
-              echo "🚨 延後時間已到，強制刪除！"
+              curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+                -d chat_id=$TG_CHAT_ID -d text="🚨 延後時間已到，正在強制刪除服務器..."
               doctl compute droplet delete $ID --force
               echo "0" > delay_count.txt
             fi
           else
-            echo "✅ 空閒，執行刪除。"
+            curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+              -d chat_id=$TG_CHAT_ID -d text="✅ 服務器閒置，刪除成功。"
             doctl compute droplet delete $ID --force
             echo "0" > delay_count.txt
           fi
 
-          # 6. 同步計數器狀態回倉庫
+          # 6. 同步計數器
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add delay_count.txt
