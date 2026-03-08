@@ -26,7 +26,8 @@ jobs:
           IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
           
           if [ -z "$ID" ]; then 
-            echo "無服務器，結束。"; exit 0; 
+            echo "無服務器，結束。"
+            exit 0
           fi
 
           # 2. 設置 SSH 環境
@@ -43,19 +44,19 @@ jobs:
 
           # 5. 邏輯判斷
           if [ "$IS_BUSY" == "YES" ]; then
-             if [ "$COUNT" -lt 1 ]; then
-               echo $((COUNT + 1)) > delay_count.txt
-               echo "⚠️ 檢測到使用，這是第 $((COUNT + 1)) 次延後。"
-               exit 0
-             else
-               echo "🚨 延後時間已到，強制刪除！"
-               doctl compute droplet delete $ID --force
-               echo "0" > delay_count.txt
-             fi
+            if [ "$COUNT" -lt 1 ]; then
+              echo $((COUNT + 1)) > delay_count.txt
+              echo "⚠️ 檢測到使用，這是第 $((COUNT + 1)) 次延後。"
+              exit 0
+            else
+              echo "🚨 延後時間已到，強制刪除！"
+              doctl compute droplet delete $ID --force
+              echo "0" > delay_count.txt
+            fi
           else
-             echo "✅ 空閒，執行刪除。"
-             doctl compute droplet delete $ID --force
-             echo "0" > delay_count.txt
+            echo "✅ 空閒，執行刪除。"
+            doctl compute droplet delete $ID --force
+            echo "0" > delay_count.txt
           fi
 
           # 6. 同步計數器狀態回倉庫
