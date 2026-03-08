@@ -1,50 +1,66 @@
 name: DO_Cleanup_Task
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: '57 * * * *' # 每小時執行一次
+    - cron: '57 * * * *'
 
 jobs:
   cleanup_droplet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: digitalocean/action-doctl@v2
-        with: { token: ${{ secrets.DO_TOKEN }} }
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Check Usage and Manage
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_TOKEN }}
+
+      - name: Check and Destroy
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          # 1. 初始化計數器檔案 (如果沒有的話)
+          # 1. 獲取 Droplet ID 和 IP
+          ID=$(doctl compute droplet list --format "ID,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          IP=$(doctl compute droplet list --format "PublicIPv4,Name" --no-header | grep "minidrop" | awk '{print $1}')
+          
+          if [ -z "$ID" ]; then 
+            echo "無服務器，結束。"; exit 0; 
+          fi
+
+          # 2. 設置 SSH 環境
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # 3. 檢查鎖定檔
+          IS_BUSY=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa root@$IP "[ -f /root/in_use.lock ] && echo 'YES' || echo 'NO'")
+
+          # 4. 處理計數器檔案
           [ ! -f delay_count.txt ] && echo "0" > delay_count.txt
           COUNT=$(cat delay_count.txt)
-          
-          # 2. 檢查 VPS 是否使用中
-          # 使用 SSH 檢查鎖定檔 (你之前的邏輯)
-          IS_BUSY=$(ssh -o StrictHostKeyChecking=no -i id_rsa root@$(...) "[ -f /root/in_use.lock ] && echo 'YES' || echo 'NO'")
 
-          # 3. 核心邏輯：判斷延遲還是強制刪除
+          # 5. 邏輯判斷
           if [ "$IS_BUSY" == "YES" ]; then
              if [ "$COUNT" -lt 1 ]; then
-               # 第一次檢測到使用，延後 1 小時
-               NEW_COUNT=$((COUNT + 1))
-               echo $NEW_COUNT > delay_count.txt
-               echo "⚠️ 檢測到使用，延後第 $NEW_COUNT 次 (共允許延後 1 次)。"
-               exit 0 
+               echo $((COUNT + 1)) > delay_count.txt
+               echo "⚠️ 檢測到使用，這是第 $((COUNT + 1)) 次延後。"
+               exit 0
              else
-               # 已經延後過，強制刪除
                echo "🚨 延後時間已到，強制刪除！"
-               doctl compute droplet delete $(...) --force
+               doctl compute droplet delete $ID --force
                echo "0" > delay_count.txt
              fi
           else
-             # 沒有在使用，正常刪除並重置計數
-             doctl compute droplet delete $(...) --force
+             echo "✅ 空閒，執行刪除。"
+             doctl compute droplet delete $ID --force
              echo "0" > delay_count.txt
           fi
-          
-          # 注意：你需要將 delay_count.txt 提交回倉庫才能記錄狀態
+
+          # 6. 同步計數器狀態回倉庫
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add delay_count.txt
-          git commit -m "Update delay count"
+          git commit -m "Update delay count" || echo "No changes to commit"
           git push
