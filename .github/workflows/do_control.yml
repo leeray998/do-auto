@@ -118,7 +118,7 @@ jobs:
             echo "🛠️ 开始强制全自动安装 s-ui..."
             export DEBIAN_FRONTEND=noninteractive
             VERSION=1.2.2
-            yes "" | bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
+            yes "" | bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh) $VERSION
             sleep 5
 
       # --- 修改后的 SCP：增加了自动信任指纹 ---
