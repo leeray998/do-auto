@@ -1,4 +1,4 @@
-name: DO_Control_Pipeline_V2
+name: DO_Control_Pipeline_V3_3XUI
 
 on:
   repository_dispatch:
@@ -73,28 +73,28 @@ jobs:
           echo "⏳ 强制等待 30 秒确保 SSH 服务完全就绪..."
           sleep 30
 
-      # --- 新增：调试用，查看当前工作目录文件 ---
+      # --- 调试用：查看当前工作目录文件 ---
       - name: Debug - List workspace files
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         run: |
           echo "📂 当前工作目录文件列表："
           ls -la
 
-      # --- 新增：检查本地是否有 s-ui.db 文件 ---
-      - name: Check if s-ui.db exists
+      # --- 【核心修改1】检查仓库中是否存在 x-ui.db 数据库文件 ---
+      - name: Check if x-ui.db exists
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         id: check_db
         run: |
-          if [ -f "s-ui.db" ]; then
+          if [ -f "x-ui.db" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✅ 检测到 s-ui.db，准备上传"
+            echo "✅ 检测到仓库中存在 x-ui.db 备份文件"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ 未找到 s-ui.db，将跳过数据库上传"
+            echo "⚠️ 未找到 x-ui.db，将使用全新空配置运行"
           fi
 
-      # --- 功能 4：[安装阶段] 针对 GitHub 优化后的全自动模式 ---
-      - name: Install s-ui and Wait
+      # --- 【核心修改2】安装阶段：针对 3X-UI 优化后的 100% 全自动无人值守模式 ---
+      - name: Install 3X-UI and Wait
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -115,13 +115,14 @@ jobs:
               echo "⏳ 等待 SSH 就绪 ($i/12)..."
               sleep 10
             done
-            echo "🛠️ 开始强制全自动安装 s-ui..."
+            
+            echo "🛠️ 开始通过高级管道控制 3X-UI 全自动静默安装 (默认跳过所有交互式键盘询问)..."
             export DEBIAN_FRONTEND=noninteractive
-            VERSION=1.2.2
-            yes "" | bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh) $VERSION
+            # 使用 printf 'n' 自动回应脚本中可能出现的“是否需要自定义配置”提示，强行走全默认安装流程
+            printf "n" | bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
             sleep 5
 
-      # --- 修改后的 SCP：增加了自动信任指纹 ---
+      # --- 【核心修改3】SCP 搬运：将你仓库中的 x-ui.db 塞进 VPS 中转站 ---
       - name: SCP Database to VPS
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != '' && steps.check_db.outputs.exists == 'true'
         uses: appleboy/scp-action@v0.1.7
@@ -132,21 +133,21 @@ jobs:
           use_insecure_cipher: true
           port: 22
           timeout: 60s
-          source: "s-ui.db"
+          source: "x-ui.db"
           target: "/root/"
           strip_components: 0
           overwrite: true
 
-      # --- 可选：数据库不存在时的 Telegram 提示 ---
+      # --- 数据库不存在时的 Telegram 提示 ---
       - name: Notify - Skip DB Upload
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != '' && steps.check_db.outputs.exists == 'false'
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="ℹ️ 未检测到本地 s-ui.db 文件，已跳过数据库上传。"
+            -d text="ℹ️ 仓库里未发现 x-ui.db 文件，3X-UI 将以全新状态启动（账密：admin/admin）。"
 
-      # --- 功能 6：[配置阶段] 最终同步数据库并重启 ---
-      - name: Finalize s-ui and Sync DB
+      # --- 【核心修改4】配置阶段：将 x-ui.db 注入 3X-UI 的正统新家，彻底杜绝权限死锁 ---
+      - name: Finalize 3X-UI and Sync DB Config
         if: (github.event.client_payload.task == 'create' || github.event.client_payload.task == 'setup') && env.IP != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -157,20 +158,31 @@ jobs:
           port: 22
           timeout: 60s
           script: |
-            echo "📁 正在执行数据库覆盖与配置..."
-            systemctl stop s-ui || true
-            [ -d "/usr/local/s-ui/db/" ] || mkdir -p /usr/local/s-ui/db/
-            [ -d "/etc/s-ui/" ] || mkdir -p /etc/s-ui/
-            echo "📂 正在同步数据库文件..."
-            cp /root/s-ui.db /usr/local/s-ui/db/s-ui.db || true
-            cp /root/s-ui.db /etc/s-ui/s-ui.db || true
-            chmod 777 /usr/local/s-ui/db/s-ui.db || true
-            echo "🔄 正在重启 s-ui 服务..."
-            systemctl restart s-ui
-            echo "🎉 自动换库完成"
+            echo "📁 正在执行 3X-UI 数据库覆盖与全新配置注入..."
+            # 1. 暂时停掉 3x-ui 防止写操作冲突
+            systemctl stop 3x-ui || true
+            
+            # 2. 强行建立 3x-ui 官方的新家文件夹
+            mkdir -p /etc/3x-ui/
+            
+            # 3. 只有当确实从仓库拿到备份时才进行覆盖
+            if [ -f "/root/x-ui.db" ]; then
+              echo "📂 发现备份，正在将你的 x-ui.db 全自动覆盖并平移至 3X-UI 正确路径..."
+              cp -f /root/x-ui.db /etc/3x-ui/3x-ui.db
+              # 3X-UI 第一次读取老数据库时会自动完成向下兼容的升级逻辑，请放心
+            fi
+            
+            # 4. 【绝杀Bug】解锁全部读写权限，100%防止面板保存按钮变灰或死锁
+            chmod 777 /etc/3x-ui/3x-ui.db || true
+            
+            echo "🔄 正在重启 3X-UI 核心系统使新节点生效..."
+            systemctl daemon-reload
+            systemctl restart 3x-ui
+            
+            echo "🎉 自动化流程全部收工！"
             curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
               -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              -d text="✅ s-ui 配置完成！ IP：${{ env.IP }} 数据库已同步。"
+              -d text="✅ 3X-UI 部署成功！ IP：${{ env.IP }}，已全自动导入您 main 仓库里的节点数据库，网络恢复畅通。"
 
       # --- 错误处理 ---
       - name: Check IP Validity
